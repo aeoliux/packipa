@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+
+CONFIG=Debug
+TARGET=iphoneos
+CERTIFICATE=""
+PROJECT="iosApp.xcodeproj"
+SCHEME="iosApp"
+PACKIPA_DIR="$TMPDIR/packipa/$(dd if=/dev/urandom bs=512 count=1 2>/dev/null | md5sum | awk '{print $1}')"
+OUTPUT_FILE="$PACKIPA_DIR/Payload.ipa"
+CLEANUP=0
+VERBOSE=0
+
+log() {
+	echo "==> $1"
+}
+
+verbose() {
+	[ "${VERBOSE}" = "1" ] && log "$1"
+}
+
+[ -f ./packipa.conf ] && log "Found configuration in cwd!" && . ./packipa.conf
+
+while getopts "T:c:t:p:s:o:vrChD" opt; do
+	case $opt in
+		T)
+			PACKIPA_DIR="${OPTARG}"
+			;;
+		c)
+			CERTIFICATE="${OPTARG}"
+			;;
+		t)
+			TARGET="${OPTARG}"
+			;;
+		p)
+			PROJECT="${OPTARG}"
+			;;
+		s)
+			SCHEME="${OPTARG}"
+			;;
+		o)
+			OUTPUT_FILE="${OPTARG}"
+			if [ ! "${OUTPUT_FILE[0]}" = "/" ]; then
+				OUTPUT_FILE="${PWD}/${OUTPUT_FILE}"
+			fi
+			;;
+		v)
+			VERBOSE=1
+			;;
+		r)
+			CONFIG=Release
+			;;
+		C)
+			CLEANUP=1
+			;;
+		D)
+			log "Cleaning up existing data..."
+			rm -rf "${TMPDIR}/packipa"
+			exit 0
+			;;
+		h)
+			echo "Usage: $0 [ -c cert ] [ -t targetos ] [ -p project ] [ -s scheme ] [ -o outputfile ] [ -T buildtempdir ] [ -v ] [ -r ] [ -C ] [ -D ]"
+			echo
+			echo "	-c [cert]			Use local certificate (from keychain access) to sign ipa."
+			echo "	-t [targetos]			Set target OS (default: iphoneos)."
+			echo "	-p [project]			Path to Xcode project (default: iosApp.xcodeproj)."
+			echo "	-s [scheme]			Scheme from Xcode project to be built (default: iosApp)."
+			echo "	-o [outputfile]			Set path of generated IPA package file (default: <BUILD_TEMP_DIR>/Payload.ipa)."
+			echo "	-T [buildtempdir]		Set BUILD_TEMP_DIR (default: <TMPDIR>/packipa/<random_hash>). All build temporary files will be generated there."
+			echo "	-v				Enable verbose output (do not hide build stdout)."
+			echo "	-r				Build as Release instead of Debug."
+			echo "	-C				Cleanup BUILD_TEMP_DIR. This option should be set together with -o."
+			echo "	-D				Cleanup all existing packipa data. Program exits after this flag is set."
+
+			exit 0
+			;;
+	esac
+done
+
+PAYLOAD_DIR="$PACKIPA_DIR/Payload"
+BUILD_DIR="$PACKIPA_DIR/Build"
+
+[ "${VERBOSE}" = "1" ] && cat << EOF
+	BUILD_TEMP_DIR=		${PACKIPA_DIR}
+	PAYLOAD_DIR=		${PAYLOAD_DIR}
+	BUILD_DIR=		${BUILD_DIR}
+	OUTPUT_FILE=		${OUTPUT_FILE}
+	CERTIFICATE=		${CERTIFICATE}
+	CONFIG=			${CONFIG}
+	TARGET=			${TARGET}
+	XCODEPROJ=		${PROJECT}:${SCHEME}
+EOF
+
+error() {
+	echo "==> Error at $(caller)" > /dev/stderr
+	echo
+	
+	[ "${CLEANUP}" = "1" ] && echo "==> Cleaning up..." && rm -rf "$PACKIPA_DIR"
+
+	exit 1
+}
+
+trap 'error' ERR
+
+log "Creating directory structure..."
+mkdir -p "${PACKIPA_DIR}" "${PAYLOAD_DIR}" "${BUILD_DIR}"
+
+log "Starting build of '${PROJECT}:${SCHEME}'..."
+if [ "${VERBOSE}" = "1" ]; then
+	xcodebuild -project "${PROJECT}" -scheme "${SCHEME}" -sdk "${TARGET}" -configuration "${CONFIG}" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO SYMROOT="${BUILD_DIR}"
+else
+	xcodebuild -project "${PROJECT}" -scheme "${SCHEME}" -sdk "${TARGET}" -configuration "${CONFIG}" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO SYMROOT="${BUILD_DIR}" > /dev/null
+fi
+
+log "Looking for an app in Xcode build directory..."
+appdir=$(find "${BUILD_DIR}/${CONFIG}-${TARGET}" -type d -name '*.app' | awk '{print $0}')
+if [ -z "${appdir}" ]; then
+	log "App has not been generated. That's an error!"
+	exit 1
+fi
+echo "	Found: '${appdir}'!"
+
+log "Copying app to Payload..."
+cp -pr "${appdir}" "${PAYLOAD_DIR}"
+pushd "${PACKIPA_DIR}" > /dev/null 2>&1
+
+baseappdir=$(basename "${appdir}")
+appname="${baseappdir%%.*}"
+if [ -n "${CERTIFICATE}" ]; then
+	log "Signing app with '${CERTIFICATE}' local certificate..."
+	codesign --force --sign "${CERTIFICATE}" "${PAYLOAD_DIR}/${baseappdir}/${appname}"
+fi
+
+log "Creating .ipa package..."
+if [ "${VERBOSE}" = "1" ]; then
+	zip -r "${OUTPUT_FILE}" Payload
+else
+	zip -r "${OUTPUT_FILE}" Payload > /dev/null
+fi
+
+popd > /dev/null 2>&1
+
+if [ "${CLEANUP}" = "1" ]; then
+	log "Cleaning up..."
+	rm -rf "${PACKIPA_DIR}"
+fi
+
+[ -f "${OUTPUT_FILE}" ] && log "Package created at '${OUTPUT_FILE}'."
