@@ -19,6 +19,9 @@ verbose() {
 }
 
 [ -f ./packipa.conf ] && log "Found configuration in cwd!" && . ./packipa.conf
+if [ ! "${OUTPUT_FILE:0:1}" = "/" ]; then
+	OUTPUT_FILE="${PWD}/${OUTPUT_FILE}"
+fi
 
 while getopts "T:c:t:p:s:o:vrChD" opt; do
 	case $opt in
